@@ -1,4 +1,3 @@
-cat << 'EOF' > README.md
 # 🛰️ MODIS & VIIRS Thermal Anomaly Harmonizer
 **2026 NASA Space Apps Challenge** | Challenge: *Harmonization of MODIS and VIIRS Hot Spots*
 
