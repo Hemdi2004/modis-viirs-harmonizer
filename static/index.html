@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MODIS & VIIRS Thermal Anomaly Harmonizer | NASA Space Apps 2026</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #0b0f19;
+      --panel: #131a2a;
+      --border: #23304a;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --fire-low: #facc15;
+      --fire-med: #f97316;
+      --fire-high: #ef4444;
+      --fused: #a855f7;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: system-ui, -apple-system, sans-serif; }
+    body { background: var(--bg); color: var(--text); display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+    header {
+      background: var(--panel); border-bottom: 1px solid var(--border); padding: 12px 20px;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    header h1 { font-size: 1.05rem; font-weight: 700; letter-spacing: 0.3px; }
+    header span { font-size: 0.78rem; color: var(--accent); background: rgba(56,189,248,0.12); padding: 4px 10px; border-radius: 999px; }
+    .main-grid { display: grid; grid-template-columns: 360px 1fr; flex: 1; overflow: hidden; }
+    .sidebar {
+      background: var(--panel); border-right: 1px solid var(--border); padding: 16px;
+      overflow-y: auto; display: flex; flex-direction: column; gap: 16px;
+    }
+    .card { background: rgba(11,15,25,0.65); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+    .card h2 { font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin-bottom: 10px; }
+    .kpi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .kpi { background: var(--panel); padding: 10px; border-radius: 8px; border: 1px solid var(--border); }
+    .kpi .val { font-size: 1.25rem; font-weight: 700; color: #fff; }
+    .kpi .lbl { font-size: 0.7rem; color: var(--muted); margin-top: 2px; }
+    .control-row { display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; }
+    .control-row label { font-size: 0.82rem; display: flex; justify-content: space-between; }
+    input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+    .btn-group { display: flex; flex-wrap: wrap; gap: 6px; }
+    button {
+      background: var(--panel); color: var(--text); border: 1px solid var(--border);
+      padding: 6px 10px; border-radius: 6px; font-size: 0.78rem; cursor: pointer; transition: 0.15s;
+    }
+    button:hover { border-color: var(--accent); }
+    button.active { background: var(--accent); color: #0b0f19; font-weight: 600; border-color: var(--accent); }
+    .calendar-strip { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin-top: 10px; }
+    .cal-day {
+      background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+      padding: 6px 4px; text-align: center; cursor: pointer; transition: 0.15s;
+    }
+    .cal-day.spike { border-color: var(--fire-high); background: rgba(239,68,68,0.18); }
+    .cal-day.selected { outline: 2px solid var(--accent); }
+    .cal-day .d-date { font-size: 0.65rem; color: var(--muted); }
+    .cal-day .d-frp { font-size: 0.72rem; font-weight: 700; margin-top: 2px; }
+    .cal-day .d-tag { font-size: 0.58rem; color: var(--fire-high); font-weight: 700; }
+    .workspace { display: flex; flex-direction: column; height: 100%; }
+    #map { flex: 1; width: 100%; z-index: 1; }
+    .legend {
+      display: flex; gap: 14px; font-size: 0.75rem; padding: 8px 16px;
+      background: var(--panel); border-top: 1px solid var(--border); align-items: center; flex-wrap: wrap;
+    }
+    .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🛰️ MODIS (1km) + VIIRS (375m) Thermal Anomaly Harmonizer</h1>
+    <span>WGS 84 (EPSG:4326) • Türkiye AOI</span>
+  </header>
+
+  <div class="main-grid">
+    <aside class="sidebar">
+      <div class="card">
+        <h2>Harmonization Metrics</h2>
+        <div class="kpi-grid">
+          <div class="kpi"><div class="val" id="kpi-raw">-</div><div class="lbl">Raw Detections</div></div>
+          <div class="kpi"><div class="val" id="kpi-harm">-</div><div class="lbl">Harmonized Events</div></div>
+          <div class="kpi"><div class="val" id="kpi-dedup">-</div><div class="lbl">Cross-Sensor Dedup</div></div>
+          <div class="kpi"><div class="val" id="kpi-spikes">-</div><div class="lbl">Anomaly Spike Days</div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>DBSCAN Spatial Clustering</h2>
+        <div class="control-row">
+          <label><span>Haversine Radius (<code>eps_km</code>)</span><strong id="eps-val">1.0 km</strong></label>
+          <input type="range" id="eps-slider" min="0.2" max="5.0" step="0.2" value="1.0" />
+        </div>
+        <div class="control-row" style="margin-bottom:0;">
+          <label><span>Sensor Layer Filter</span></label>
+          <div class="btn-group" id="sensor-filters">
+            <button class="active" data-sensor="ALL">All Harmonized</button>
+            <button data-sensor="MODIS+VIIRS">Fused (MODIS+VIIRS)</button>
+            <button data-sensor="VIIRS">VIIRS Only (375m)</button>
+            <button data-sensor="MODIS">MODIS Only (1km)</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Quick ROI Navigation</h2>
+        <div class="btn-group">
+          <button onclick="flyToROI(39.0, 35.2, 6)">🇹🇷 Full Türkiye</button>
+          <button onclick="flyToROI(41.2, 32.6, 10)">🌲 Karabük Zone</button>
+          <button onclick="flyToROI(37.0, 30.5, 8)">🔥 Mediterranean</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Burning Activity Calendar & Spikes</h2>
+        <canvas id="frpChart" height="145"></canvas>
+        <div class="calendar-strip" id="calendar-strip"></div>
+        <div style="margin-top:8px; text-align:right;">
+          <button id="reset-date-btn" style="font-size:0.7rem; display:none;" onclick="clearDateFilter()">Show All Dates</button>
+        </div>
+      </div>
+    </aside>
+
+    <main class="workspace">
+      <div id="map"></div>
+      <div class="legend">
+        <strong>FRP Intensity:</strong>
+        <span><i class="dot" style="background:#facc15;"></i>Low (&lt;30 MW)</span>
+        <span><i class="dot" style="background:#f97316;"></i>Moderate (30–80 MW)</span>
+        <span><i class="dot" style="background:#ef4444;"></i>Severe (&gt;80 MW)</span>
+        <span style="margin-left:auto;"><i class="dot" style="border:2px solid #a855f7; background:transparent;"></i>Purple Ring = Cross-Sensor Fused Centroid</span>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const map = L.map("map").setView([39.0, 35.2], 6);
+    L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/{z}/{y}/{x}", {
+      attribution: "Tiles &copy; Esri | NASA FIRMS",
+      maxZoom: 16
+    }).addTo(map);
+    let markersLayer = L.layerGroup().addTo(map);
+    let currentData = null;
+    let activeSensor = "ALL";
+    let activeDate = null;
+    let chartInstance = null;
+
+    function flyToROI(lat, lon, zoom) {
+      map.flyTo([lat, lon], zoom, { duration: 0.8 });
+    }
+
+    function getFrpColor(frp) {
+      if (frp >= 80) return "#ef4444";
+      if (frp >= 30) return "#f97316";
+      return "#facc15";
+    }
+
+    async function fetchHarmonized() {
+      const eps = document.getElementById("eps-slider").value;
+      document.getElementById("eps-val").textContent = `${parseFloat(eps).toFixed(1)} km`;
+      const res = await fetch(`/api/harmonize?eps_km=${eps}`);
+      currentData = await res.json();
+      updateKPIs();
+      renderCalendarAndChart();
+      renderMarkers();
+    }
+
+    function updateKPIs() {
+      const s = currentData.stats;
+      const spikes = currentData.calendar.filter(d => d.is_spike).length;
+      document.getElementById("kpi-raw").textContent = s.raw_total;
+      document.getElementById("kpi-harm").textContent = s.harmonized_count;
+      document.getElementById("kpi-dedup").textContent = `${s.deduplication_rate_pct}%`;
+      document.getElementById("kpi-spikes").textContent = spikes;
+    }
+
+    function renderMarkers() {
+      markersLayer.clearLayers();
+      if (!currentData) return;
+
+      const filtered = currentData.hotspots.filter(h => {
+        const sensorMatch = activeSensor === "ALL" || h.sensor_source === activeSensor;
+        const dateMatch = !activeDate || h.acq_date === activeDate;
+        return sensorMatch && dateMatch;
+      });
+
+      filtered.forEach(h => {
+        const isFused = h.sensor_source === "MODIS+VIIRS";
+        const color = getFrpColor(h.frp);
+        const radius = Math.min(Math.max(Math.sqrt(h.frp) * 1.4, 6), 22);
+
+        const circle = L.circleMarker([h.latitude, h.longitude], {
+          radius,
+          fillColor: color,
+          color: isFused ? "#a855f7" : color,
+          weight: isFused ? 2.5 : 1,
+          opacity: 0.95,
+          fillOpacity: 0.72
+        });
+
+        circle.bindPopup(`
+          <div style="color:#0f172a; font-size:12px; line-height:1.45;">
+            <strong>${h.sensor_source} Event</strong><br/>
+            <b>Date:</b> ${h.acq_date}<br/>
+            <b>Coords (WGS 84):</b> ${h.latitude}, ${h.longitude}<br/>
+            <b>Harmonized FRP:</b> ${h.frp} MW<br/>
+            <b>Norm. Confidence:</b> ${(h.confidence * 100).toFixed(0)}%<br/>
+            <b>Clustered Pixels:</b> ${h.merged_detections}
+          </div>
+        `);
+        circle.addTo(markersLayer);
+      });
+    }
+
+    function renderCalendarAndChart() {
+      const cal = currentData.calendar;
+      const strip = document.getElementById("calendar-strip");
+      strip.innerHTML = "";
+
+      cal.forEach(day => {
+        const div = document.createElement("div");
+        div.className = `cal-day ${day.is_spike ? "spike" : ""} ${activeDate === day.date ? "selected" : ""}`;
+        div.innerHTML = `
+          <div class="d-date">${day.date.slice(5)}</div>
+          <div class="d-frp">${Math.round(day.total_frp)}</div>
+          <div class="d-tag">${day.is_spike ? "SPIKE" : "MW"}</div>
+        `;
+        div.onclick = () => {
+          activeDate = activeDate === day.date ? null : day.date;
+          document.getElementById("reset-date-btn").style.display = activeDate ? "inline-block" : "none";
+          renderCalendarAndChart();
+          renderMarkers();
+        };
+        strip.appendChild(div);
+      });
+
+      const ctx = document.getElementById("frpChart").getContext("2d");
+      if (chartInstance) chartInstance.destroy();
+      chartInstance = new Chart(ctx, {
+        type: "bar",
+        data: {
+          labels: cal.map(d => d.date.slice(5)),
+          datasets: [{
+            label: "Daily Harmonized FRP (MW)",
+            data: cal.map(d => d.total_frp),
+            backgroundColor: cal.map(d => d.is_spike ? "#ef4444" : "#38bdf8"),
+            borderRadius: 4
+          }]
+        },
+        options: {
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { ticks: { color: "#94a3b8", font: { size: 10 } }, grid: { display: false } },
+            y: { ticks: { color: "#94a3b8", font: { size: 10 } }, grid: { color: "#23304a" } }
+          }
+        }
+      });
+    }
+
+    function clearDateFilter() {
+      activeDate = null;
+      document.getElementById("reset-date-btn").style.display = "none";
+      renderCalendarAndChart();
+      renderMarkers();
+    }
+
+    document.getElementById("eps-slider").addEventListener("change", fetchHarmonized);
+    document.querySelectorAll("#sensor-filters button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("#sensor-filters button").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        activeSensor = btn.dataset.sensor;
+        renderMarkers();
+      });
+    });
+
+    fetchHarmonized();
+  </script>
+</body>
+</html>
